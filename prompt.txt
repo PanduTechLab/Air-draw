@@ -1,0 +1,131 @@
+✦ AIR DRAW — Rebuild Prompt
+============================
+Copy and paste this into Claude to get the exact same app.
+
+Build a single-file HTML air drawing app called "✦ Air Draw". No frameworks,
+no npm, no build step — everything inline in one .html file that opens in Chrome.
+
+WHAT IT DOES
+------------
+The webcam shows in the background. The user raises their index finger and draws
+in the air. MediaPipe tracks the hand and renders neon glowing strokes on a canvas
+overlay. A fire particle effect follows the fingertip. When the user lifts their
+finger for ~1 second, Claude AI reads the handwriting via vision API and replaces
+the rough strokes with clean neon cursive text (Dancing Script font).
+
+DEPENDENCIES (CDN only)
+-----------------------
+- MediaPipe Hands, Camera Utils, Drawing Utils from cdn.jsdelivr.net/npm/@mediapipe/
+- Google Font: Dancing Script Bold
+- Anthropic API: POST https://api.anthropic.com/v1/messages (no API key in code)
+
+GESTURES
+--------
+- Index finger only up          → DRAW
+- Index + middle up             → PAUSE (lift pen)
+- All 4 fingers up (open palm)  → PALM_ERASE (erase area under hand, no visual ring)
+- Fist / anything else          → IDLE
+
+LAYOUT
+------
+Three stacked full-viewport layers: mirrored <video> → drawCanvas → overlayCanvas.
+
+Top bar: "✦ AIR DRAW" logo + status badge (dot + text: Ready/Drawing/Paused/Erasing).
+
+Right sidebar (glass pill, backdrop blur):
+  - 7 color swatches: #ff6b6b #ffd93d #6bcb77 #4d96ff #ff922b #cc5de8 #ffffff
+  - Vertical brush size slider (min=1 max=20 default=3)
+  - Buttons: Eraser toggle, Clear all, Save PNG, ✦ AI Auto-correct toggle (on by default)
+
+Left sidebar (same style):
+  - 5 vertical sliders for camera: Brightness(120), Contrast(110),
+    Saturation(120), Sharpness(0-5), Opacity(75)
+  - Each updates video CSS filter live
+
+Bottom bar: gesture hints (left) + "Mode: DRAWING" label (right)
+AI toast: centered glass pill above bottom bar, shows AI status messages, auto-hides
+
+Loading screen: full overlay with spinner, fades out once camera + model ready
+
+FINGERTIP POSITION (critical)
+------------------------------
+Don't use landmark 8 directly. Extend 12% of finger length past it:
+
+  tipX = (1 - lm[8].x) * W     // mirror X
+  tipY = lm[8].y * H
+  knkX = (1 - lm[5].x) * W     // knuckle
+  knkY = lm[5].y * H
+  dir  = normalize(tip - knuckle)
+  rawX = tipX + dir.x * fingerLength * 0.12
+  rawY = tipY + dir.y * fingerLength * 0.12
+
+ALL canvas X coords use (1 - lm.x) * W to compensate for mirrored video.
+
+ADAPTIVE SMOOTHING (3 tiers)
+-----------------------------
+  speed = distance(raw, ema)
+  if speed > 12  →  smoothX = rawX (pure raw, zero lag)
+  if speed > 5   →  ema = ema*0.70 + raw*0.30
+  else           →  ema = ema*0.50 + raw*0.50
+  When switching to pure raw, resync ema=raw so next frame starts clean.
+
+STROKE ENGINE
+-------------
+1. startStroke: seed 3 identical points into buffer so preview draws immediately
+2. addPoint: spacing gate of 2px (only after 3 points exist), calls livePreviewAppend
+3. livePreviewAppend: quadratic bezier through last 3 points for smooth live preview
+   - Neon layer: color stroke, lineWidth=sz*0.6, shadowBlur=sz*0.8
+   - Filament: white stroke, lineWidth=sz*0.12
+4. onResults movement gate: only call addPoint if d > 0.8px
+5. endStroke:
+   - RDP simplify (epsilon=3) → removes tremor noise
+   - Chaikin subdivide (3 iterations) → smooth curves
+   - Store smoothed path, push to history, redrawHistory()
+   - After 900ms debounce with no new strokes → trigger AI correction
+
+NEON RENDERING (renderPath)
+----------------------------
+Draw all points as one canvas path, 4 layers:
+  1. sz*1.0 width, 4% alpha    (ambient bloom)
+  2. sz*0.55 width, 18% alpha  (color halo)
+  3. sz*0.6 width, 100% alpha, shadowBlur=sz*0.8  (neon core)
+  4. white, sz*0.12 width, 60% alpha, shadowBlur=sz*0.4  (filament)
+
+FIRE PARTICLES (60fps rAF loop, independent of MediaPipe)
+----------------------------------------------------------
+Spawn 4-7 particles/frame at fingertip while DRAW gesture active (max 120).
+Each: angle mostly upward, speed 1.5-4, vy -= 0.06 gravity, vx *= 0.97 drag.
+Color: hsl from current color ±15°. Fade over ~25 frames. Render with shadowBlur=8.
+
+rAF loop each frame:
+  spawnParticles → updateParticles → clearOverlayCanvas →
+  drawSkeleton(stored landmarks) → drawParticles → drawFingertipGlow
+
+Fingertip glow: pulsing ring + white hot core dot + color halo (3 layers).
+NEVER clear overlayCanvas inside onResults — only the rAF loop clears it.
+
+AI AUTO-CORRECT
+---------------
+Trigger: 900ms after last stroke lift, batch all strokes since last correction.
+Process:
+  1. Render strokes onto temp canvas (dark bg, plain color lines, no glow)
+  2. Convert to base64 PNG
+  3. Send to Claude API with prompt:
+     "What letter(s) or word is written? Reply with ONLY the text, 1-4 chars max."
+     model: claude-sonnet-4-20250514, max_tokens: 60
+  4. Strip rough strokes from history, redrawHistory()
+  5. Push {type:'glyph', text, x, y, fontSize, color} to history
+  6. Render clean neon text using Dancing Script Bold, 4-layer neon (same as strokes)
+  Fallback: if AI fails, apply RDP+Chaikin smoothing and keep original strokes.
+
+redrawHistory handles 3 types: 'erase' → eraseCircle, 'glyph' → neon text, else → renderPath
+
+KEY RULES
+---------
+- Mirror compensation: all X = (1 - lm.x) * W
+- rAF is the ONLY thing that clears overlayCanvas (no flicker)
+- Seed 3 points in startStroke or drawing won't start for first 3 frames
+- Spacing gate only activates after 3 points exist (seeds always pass through)
+- No API key in code — environment handles it automatically
+- Palm erase is silent — no visual indicator, just erases under hand
+- Glyph strokes re-render on every redrawHistory so they survive canvas resize
